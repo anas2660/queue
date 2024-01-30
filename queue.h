@@ -11,7 +11,7 @@
 
                       Queue Description
 
-  Queues work in relative index space.
+  Queues work in index space.
    - You provide the buffer.
    - You mod the index by the buffer size.
      - This allows for arbitrary queue sizes while preserving
@@ -75,8 +75,8 @@ typedef struct SPSCQueue {
 } SPSCQueue;
 
 typedef struct MPMCQueue {
-    union QueueSingleSide head;
-    union QueueSingleSide tail;
+    struct QueueMultiSide head;
+    struct QueueMultiSide tail;
     unsigned int queue_size;    /* Should always be less than INT32_MAX */
     atomic_uint head_waiters;
     atomic_uint tail_waiters;
@@ -156,21 +156,43 @@ static inline void spsc_commit_consume(SPSCQueue* queue, unsigned int prepared_i
 
 /* Returns an index to push or -1 on failure (Queue is full) */
 static inline int mpmc_try_prepare_push(MPMCQueue* queue) {
-    while (1) {
-        atomic_uint tail_committed = queue->tail.committed.atomic_value;
-        atomic_uint head_pending = queue->head.pending.atomic_value;
+    unsigned int tail = atomic_load(&queue->tail.committed.atomic_value);
+    unsigned int head = atomic_load(&queue->head.pending.atomic_value);
 
-        if (queue_get_free_space_explicit(queue, head_pending, tail_committed) == 0)
+    while (1) {
+        if (queue_get_free_space_explicit(queue, head, tail) == 0)
             return -1;
 
-        /* As this is an MP queue another thread might have taken our index */
-        compare_exch
-
-        return queue->head.pending.value++;
+        /* As this is an MP queue another thread might have taken our index. */
+        /* This will update `head` on failure */
+        if (atomic_compare_exchange_strong(&queue->head.pending.atomic_value, &head, head+1))
+            return head;
     }
 }
 
+/* Returns an index to push */
+static inline int mpmc_prepare_push(MPMCQueue* queue) {
+    unsigned int tail = atomic_load(&queue->tail.committed.atomic_value);
+    unsigned int head = atomic_load(&queue->head.pending.atomic_value);
 
+    while (1) {
+        if (queue_get_free_space_explicit(queue, head, tail) == 0) {
+            QUEUE_WAIT_FOR_TAIL(queue);
+            tail = atomic_load(&queue->tail.committed.atomic_value);
+            head = atomic_load(&queue->head.pending.atomic_value);
+        }
+
+        /* As this is an MP queue another thread might have taken our index. */
+        /* This will update `head` on failure */
+        if (atomic_compare_exchange_strong(&queue->head.pending.atomic_value, &head, head+1))
+            return head;
+    }
+}
+
+/* Returns 0 on success and -1 if it is too early to push */
+static inline int mpmc_try_commit_push(MPMCQueue* queue) {
+
+}
 
 
 
