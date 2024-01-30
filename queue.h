@@ -43,33 +43,132 @@
   be equal. If the queue is single consumer the same applies for
   the tail.
 
+  Usage:
+    Producer side:
+        Use `prepare_push` functions to get an indices to work on.
+        Use `commit_push` functions to commit to the queue
+
+    Consumer side:
+        Use `prepare_consume` functions to get an indices to work on.
+        Use `commit_consume` functions to actually consume from the queue (frees indices)
+
 */
 
+union MaybeAtomicU32 {
+    atomic_uint atomic_value;
+    unsigned int value;
+};
+
 struct QueueMultiSide {
-    atomic_uint pending, committed;
+    MaybeAtomicU32 pending, committed;
 };
 
 union QueueSingleSide {
-    atomic_uint pending, committed;
+    MaybeAtomicU32 pending, committed;
 };
 
 typedef struct SPSCQueue {
     union QueueSingleSide head;
     union QueueSingleSide tail;
-    unsigned int queue_size;
+    unsigned int queue_size;    /* Should always be less than INT32_MAX */
+    atomic_uint waiters;
 } SPSCQueue;
 
-#define queue_init(queue, size) { memset((queue), 0, sizeof((queue)[0])); (queue)->queue_size = size; }
-#define queue_get_free_space(queue) ((queue)-> ())
+typedef struct MPMCQueue {
+    union QueueSingleSide head;
+    union QueueSingleSide tail;
+    unsigned int queue_size;    /* Should always be less than INT32_MAX */
+    atomic_uint head_waiters;
+    atomic_uint tail_waiters;
+} MPMCQueue;
 
-static inline int spsc_try_push() {
-    return 0;
+#define QUEUE_ATOMIC_WAIT(x)
+#define QUEUE_ATOMIC_WAKE(x, n)
+#define QUEUE_ATOMIC_WAKE_ONE(x)
+#define QUEUE_ATOMIC_WAKE_ALL(x)
+
+#define QUEUE_WAIT_FOR_TAIL(queue) QUEUE_ATOMIC_WAIT(&(queue)->tail.committed.atomic_value)
+#define QUEUE_WAIT_FOR_HEAD(queue) QUEUE_ATOMIC_WAIT(&(queue)->head.committed.atomic_value)
+
+#define QUEUE_WAKE_TAIL_WAITER(queue) QUEUE_ATOMIC_WAKE_ONE(&queue->tail.committed.atomic_value)
+#define QUEUE_WAKE_HEAD_WAITER(queue) QUEUE_ATOMIC_WAKE_ONE(&queue->head.committed.atomic_value)
+
+#define queue_init(queue, size) { memset((queue), 0, sizeof((queue)[0])); (queue)->queue_size = size; }
+#define queue_get_used_space(queue) ((queue)->head.pending.atomic_value - (queue)->tail.committed.atomic_value)
+#define queue_get_free_space_explicit(queue, head_pending, tail_committed) ((queue)->queue_size - (head_pending - tail_committed))
+#define queue_get_free_space(queue) ((queue)->queue_size - queue_get_used_space(queue))
+#define queue_get_committed_space(queue) ((queue)->head.committed.atomic_value - (queue)->tail.pending.atomic_value)
+
+/* Returns an index to push or -1 on failure (Queue is full) */
+static inline int spsc_try_prepare_push(SPSCQueue* queue) {
+    if (queue_get_free_space(queue) == 0)
+        return -1;
+
+    /* As this is an SP queue the usage cannot increase from this point
+     * onwards, so we can add safely. */
+    return queue->head.pending.value++;
 }
 
+/* Returns an index to push or -1 on failure (Queue is full) */
+static inline int spsc_prepare_push(SPSCQueue* queue) {
+    while (queue_get_free_space(queue) == 0)
+        QUEUE_WAIT_FOR_TAIL(queue);
 
+    /* As this is an SP queue the usage cannot increase from this point
+     * onwards, so we can add safely. */
+    return queue->head.pending.value++;
+}
 
+static inline void spsc_commit_push(SPSCQueue* queue, unsigned int prepared_index) {
+    queue->head.committed.atomic_value++;
 
+    /* As this is an SP queue any waiters would have to be the consumer in this case */
+    if (queue->waiters)
+        QUEUE_WAKE_HEAD_WAITER(queue);
+}
 
+/* Returns an index to consume or -1 on failure (Queue is empty) */
+static inline int spsc_try_prepare_consume(SPSCQueue* queue) {
+    if (queue_get_committed_space(queue) == 0)
+        return -1;
+
+    /* As this is an SC queue the committed cannot decrease from this point
+     * onwards, so we can add safely. */
+    return queue->tail.pending.value++;
+}
+
+static inline int spsc_prepare_consume(SPSCQueue* queue) {
+    while (queue_get_committed_space(queue) == 0)
+        QUEUE_WAIT_FOR_HEAD(queue);
+
+    /* As this is an SC queue the committed cannot decrease from this point
+     * onwards, so we can consume safely. */
+    return queue->tail.pending.value++;
+}
+
+static inline void spsc_commit_consume(SPSCQueue* queue, unsigned int prepared_index) {
+    queue->tail.committed.atomic_value++;
+
+    /* As this is an SC queue any waiters would have to be the producer in this case */
+    if (queue->waiters)
+        QUEUE_WAKE_TAIL_WAITER(queue);
+}
+
+/* Returns an index to push or -1 on failure (Queue is full) */
+static inline int mpmc_try_prepare_push(MPMCQueue* queue) {
+    while (1) {
+        atomic_uint tail_committed = queue->tail.committed.atomic_value;
+        atomic_uint head_pending = queue->head.pending.atomic_value;
+
+        if (queue_get_free_space_explicit(queue, head_pending, tail_committed) == 0)
+            return -1;
+
+        /* As this is an MP queue another thread might have taken our index */
+        compare_exch
+
+        return queue->head.pending.value++;
+    }
+}
 
 
 
