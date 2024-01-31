@@ -275,6 +275,38 @@ static inline int mpmc_prepare_consume(MPMCQueue* queue) {
     }
 }
 
+
+/* Returns 0 on success and -1 if it is too early to push*/
+static inline int mpmc_try_commit_consume(MPMCQueue* queue, unsigned int prepared_index) {
+    unsigned int tail_committed = atomic_load(&queue->tail.committed.atomic_value);
+
+    /* Wait for sequential increment */
+    if (prepared_index != tail_committed)
+        return -1;
+
+    atomic_fetch_add(&queue->tail.committed.atomic_value, 1);
+
+    if (queue->tail_waiters)
+        QUEUE_WAKE_ALL_TAIL_WAITERS(queue);
+
+    return 0;
+}
+
+
+static inline void mpmc_commit_consume(MPMCQueue* queue, unsigned int prepared_index) {
+    unsigned int tail_committed = atomic_load(&queue->tail.committed.atomic_value);
+
+    /* Wait for sequential increment */
+    while (prepared_index != tail_committed)
+        QUEUE_WAIT_FOR_TAIL(queue, tail_committed);
+
+    atomic_fetch_add(&queue->tail.committed.atomic_value, 1);
+
+    if (queue->tail_waiters)
+        QUEUE_WAKE_ALL_TAIL_WAITERS(queue);
+}
+
+
 /* struct _queue_header { */
 /*     atomic_uint position;  // Index of next task to be run. */
 /*     atomic_uint committed; // Index of last task added to the queue. */
