@@ -253,6 +253,28 @@ static inline int mpmc_try_prepare_consume(MPMCQueue* queue) {
 }
 
 
+/* Returns an index to consume */
+static inline int mpmc_prepare_consume(MPMCQueue* queue) {
+
+    /* Head needs to be loaded first, otherwise we might overestimate the amount
+     * of committed space */
+    unsigned int head = atomic_load(&queue->head.committed.atomic_value);
+    unsigned int tail = atomic_load(&queue->tail.pending.atomic_value);
+
+    while (1) {
+        if (queue_get_committed_explicit(head, tail) == 0) {
+            QUEUE_WAIT_FOR_HEAD(queue, head);
+            head = atomic_load(&queue->head.committed.atomic_value);
+            tail = atomic_load(&queue->tail.pending.atomic_value);
+        }
+
+        /* As this is an MC queue another thread might have taken our index. */
+        /* This will update `tail` on failure */
+        if (atomic_compare_exchange_strong(&queue->tail.pending.atomic_value, &tail, tail+1))
+            return tail;
+    }
+}
+
 /* struct _queue_header { */
 /*     atomic_uint position;  // Index of next task to be run. */
 /*     atomic_uint committed; // Index of last task added to the queue. */
