@@ -9,9 +9,7 @@ int main(int argc, char *argv[]) {
     }
 
     SPSCQueue q;
-    QUEUE_INIT(&q, 10);
-
-
+    queue_init(&q, 10);
 
 
 

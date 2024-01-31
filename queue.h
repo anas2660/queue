@@ -60,11 +60,11 @@ union MaybeAtomicU32 {
 };
 
 struct QueueMultiSide {
-    MaybeAtomicU32 pending, committed;
+    union MaybeAtomicU32 pending, committed;
 };
 
 union QueueSingleSide {
-    MaybeAtomicU32 pending, committed;
+    union MaybeAtomicU32 pending, committed;
 };
 
 typedef struct SPSCQueue {
@@ -82,68 +82,77 @@ typedef struct MPMCQueue {
     atomic_uint tail_waiters;
 } MPMCQueue;
 
-#define QUEUE_ATOMIC_WAIT(x)
+#define QUEUE_ATOMIC_WAIT(x, v)
 #define QUEUE_ATOMIC_WAKE(x, n)
 #define QUEUE_ATOMIC_WAKE_ONE(x)
 #define QUEUE_ATOMIC_WAKE_ALL(x)
 
-#define QUEUE_WAIT_FOR_TAIL(queue) QUEUE_ATOMIC_WAIT(&(queue)->tail.committed.atomic_value)
-#define QUEUE_WAIT_FOR_HEAD(queue) QUEUE_ATOMIC_WAIT(&(queue)->head.committed.atomic_value)
+#define QUEUE_WAIT_FOR_TAIL(queue, committed) QUEUE_ATOMIC_WAIT(&(queue)->tail.committed.atomic_value, (v))
+#define QUEUE_WAIT_FOR_HEAD(queue, committed) QUEUE_ATOMIC_WAIT(&(queue)->head.committed.atomic_value, (v))
 
 #define QUEUE_WAKE_TAIL_WAITER(queue) QUEUE_ATOMIC_WAKE_ONE(&queue->tail.committed.atomic_value)
 #define QUEUE_WAKE_HEAD_WAITER(queue) QUEUE_ATOMIC_WAKE_ONE(&queue->head.committed.atomic_value)
+#define QUEUE_WAKE_ALL_TAIL_WAITERS(queue) QUEUE_ATOMIC_WAKE_ALL(&queue->tail.committed.atomic_value)
+#define QUEUE_WAKE_ALL_HEAD_WAITERS(queue) QUEUE_ATOMIC_WAKE_ALL(&queue->head.committed.atomic_value)
 
 #define queue_init(queue, size) { memset((queue), 0, sizeof((queue)[0])); (queue)->queue_size = size; }
-#define queue_get_used_space(queue) ((queue)->head.pending.atomic_value - (queue)->tail.committed.atomic_value)
-#define queue_get_free_space_explicit(queue, head_pending, tail_committed) ((queue)->queue_size - (head_pending - tail_committed))
-#define queue_get_free_space(queue) ((queue)->queue_size - queue_get_used_space(queue))
-#define queue_get_committed_space(queue) ((queue)->head.committed.atomic_value - (queue)->tail.pending.atomic_value)
+#define queue_get_used(queue) ((queue)->head.pending.atomic_value - (queue)->tail.committed.atomic_value)
+#define queue_get_free_explicit(queue, head_pending, tail_committed) ((queue)->queue_size - ((head_pending) - (tail_committed)))
+#define queue_get_free(queue) ((queue)->queue_size - queue_get_used(queue))
+#define queue_get_committed(queue) ((queue)->head.committed.atomic_value - (queue)->tail.pending.atomic_value)
+#define queue_get_committed_explicit(head_committed, tail_pending) ((head_committed) - (tail_pending))
 
 /* Returns an index to push or -1 on failure (Queue is full) */
 static inline int spsc_try_prepare_push(SPSCQueue* queue) {
-    if (queue_get_free_space(queue) == 0)
+    if (queue_get_free(queue) == 0)
         return -1;
 
     /* As this is an SP queue the usage cannot increase from this point
-     * onwards, so we can add safely. */
-    return queue->head.pending.value++;
+     * onwards, so we can safely return the current working index. */
+    return queue->head.pending.value;
 }
 
 /* Returns an index to push or -1 on failure (Queue is full) */
 static inline int spsc_prepare_push(SPSCQueue* queue) {
-    while (queue_get_free_space(queue) == 0)
-        QUEUE_WAIT_FOR_TAIL(queue);
+    unsigned int head_pending   = queue->head.pending.value;
+    unsigned int tail_committed = queue->tail.committed.atomic_value;
+
+    while (queue_get_free_explicit(queue, head_pending, tail_committed) == 0)
+        QUEUE_WAIT_FOR_TAIL(queue, tail_committed);
 
     /* As this is an SP queue the usage cannot increase from this point
-     * onwards, so we can add safely. */
-    return queue->head.pending.value++;
+     * onwards, so we can safely return the current working index. */
+    return queue->head.pending.value;
 }
 
 static inline void spsc_commit_push(SPSCQueue* queue, unsigned int prepared_index) {
-    queue->head.committed.atomic_value++;
+    unsigned int committed = atomic_fetch_add(&queue->head.committed.atomic_value, 1);
 
     /* As this is an SP queue any waiters would have to be the consumer in this case */
-    if (queue->waiters)
+    if (queue->waiters || queue->tail.pending.value == committed)
         QUEUE_WAKE_HEAD_WAITER(queue);
 }
 
 /* Returns an index to consume or -1 on failure (Queue is empty) */
 static inline int spsc_try_prepare_consume(SPSCQueue* queue) {
-    if (queue_get_committed_space(queue) == 0)
+    if (queue_get_committed(queue) == 0)
         return -1;
 
     /* As this is an SC queue the committed cannot decrease from this point
-     * onwards, so we can add safely. */
-    return queue->tail.pending.value++;
+     * onwards, so we can safely return the current working index. */
+    return queue->tail.pending.value;
 }
 
 static inline int spsc_prepare_consume(SPSCQueue* queue) {
-    while (queue_get_committed_space(queue) == 0)
-        QUEUE_WAIT_FOR_HEAD(queue);
+    unsigned int head_committed = queue->head.committed.atomic_value;
+    unsigned int tail_pending = queue->tail.pending.value;
+
+    while (queue_get_committed_explicit(head_committed, tail_pending) == 0)
+        QUEUE_WAIT_FOR_HEAD(queue, head_committed);
 
     /* As this is an SC queue the committed cannot decrease from this point
      * onwards, so we can consume safely. */
-    return queue->tail.pending.value++;
+    return queue->tail.pending.value;
 }
 
 static inline void spsc_commit_consume(SPSCQueue* queue, unsigned int prepared_index) {
@@ -160,7 +169,7 @@ static inline int mpmc_try_prepare_push(MPMCQueue* queue) {
     unsigned int head = atomic_load(&queue->head.pending.atomic_value);
 
     while (1) {
-        if (queue_get_free_space_explicit(queue, head, tail) == 0)
+        if (queue_get_free_explicit(queue, head, tail) == 0)
             return -1;
 
         /* As this is an MP queue another thread might have taken our index. */
@@ -176,8 +185,8 @@ static inline int mpmc_prepare_push(MPMCQueue* queue) {
     unsigned int head = atomic_load(&queue->head.pending.atomic_value);
 
     while (1) {
-        if (queue_get_free_space_explicit(queue, head, tail) == 0) {
-            QUEUE_WAIT_FOR_TAIL(queue);
+        while (queue_get_free_explicit(queue, head, tail) == 0) {
+            QUEUE_WAIT_FOR_TAIL(queue, tail);
             tail = atomic_load(&queue->tail.committed.atomic_value);
             head = atomic_load(&queue->head.pending.atomic_value);
         }
@@ -189,47 +198,56 @@ static inline int mpmc_prepare_push(MPMCQueue* queue) {
     }
 }
 
-/* Returns 0 on success and -1 if it is too early to push */
-static inline int mpmc_try_commit_push(MPMCQueue* queue) {
+/* Returns 0 on success and -1 if it is too early to push. As we can only commit
+ * sequentially it can be too early to push in some cases if it would be out of
+ * order. */
+static inline int mpmc_try_commit_push(MPMCQueue* queue, unsigned int prepared_index) {
+    if (prepared_index != atomic_load(&queue->head.committed.atomic_value))
+        return -1;
 
+    unsigned int committed = atomic_fetch_add(&queue->head.committed.atomic_value, 1);
+
+    if (queue->head_waiters || committed == queue->tail.pending.atomic_value)
+        QUEUE_WAKE_ALL_HEAD_WAITERS(queue);
+
+    return 0;
 }
 
 
 
+/* struct _queue_header { */
+/*     atomic_uint position;  // Index of next task to be run. */
+/*     atomic_uint committed; // Index of last task added to the queue. */
+/*     atomic_uint pending;   // Index of last task currently being added. */
+/*     atomic_uint queuers;   // Number of queuers waiting because of full queue. */
 
-struct _queue_header {
-    atomic_uint position;  // Index of next task to be run.
-    atomic_uint committed; // Index of last task added to the queue.
-    atomic_uint pending;   // Index of last task currently being added.
-    atomic_uint queuers;   // Number of queuers waiting because of full queue.
-
-    uint32_t queue_size;
-};
-
-
-#define Queue(T) T*
-
-static inline void* allocate_queue_with_size(int type_size, uint32_t size) {
-    void* q = malloc(type_size*size + sizeof(struct _queue_header));
-    memset(q, 0, type_size*size + sizeof(struct _queue_header));
-    ((struct _queue_header*)q)[-1].queue_size = size;
-    q = &(((struct _queue_header*)q)[1]);
-    return q;
-}
-
-/* Returns a Queue(T) */
-#define make_queue(T, size) allocate_queue_with_size(sizeof(T), size)
-#define free_queue(queue) free(&((struct _queue_header*)queue)[-1])
-
-#define get_queue_header(queue) (&((struct _queue_header*)queue)[-1])
+/*     uint32_t queue_size; */
+/* }; */
 
 
-static inline int queue_free_space(void* queue) {
-    struct _queue_header* h = get_queue_header(queue);
+/* #define Queue(T) T* */
 
-    //u32 committed, u32 position, u32 queue_size
-    return h->queue_size - (h->committed - position);
-}
+/* static inline void* allocate_queue_with_size(int type_size, uint32_t size) { */
+/*     void* q = malloc(type_size*size + sizeof(struct _queue_header)); */
+/*     memset(q, 0, type_size*size + sizeof(struct _queue_header)); */
+/*     ((struct _queue_header*)q)[-1].queue_size = size; */
+/*     q = &(((struct _queue_header*)q)[1]); */
+/*     return q; */
+/* } */
+
+/* /\* Returns a Queue(T) *\/ */
+/* #define make_queue(T, size) allocate_queue_with_size(sizeof(T), size) */
+/* #define free_queue(queue) free(&((struct _queue_header*)queue)[-1]) */
+
+/* #define get_queue_header(queue) (&((struct _queue_header*)queue)[-1]) */
+
+
+/* static inline int queue_free(void* queue) { */
+/*     struct _queue_header* h = get_queue_header(queue); */
+
+/*     //u32 committed, u32 position, u32 queue_size */
+/*     return h->queue_size - (h->committed - position); */
+/* } */
 
 
 
