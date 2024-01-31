@@ -165,6 +165,9 @@ static inline void spsc_commit_consume(SPSCQueue* queue, unsigned int prepared_i
 
 /* Returns an index to push or -1 on failure (Queue is full) */
 static inline int mpmc_try_prepare_push(MPMCQueue* queue) {
+
+    /* Tail needs to be loaded first, otherwise we might overestimate the amount
+     * of free space */
     unsigned int tail = atomic_load(&queue->tail.committed.atomic_value);
     unsigned int head = atomic_load(&queue->head.pending.atomic_value);
 
@@ -181,6 +184,9 @@ static inline int mpmc_try_prepare_push(MPMCQueue* queue) {
 
 /* Returns an index to push */
 static inline int mpmc_prepare_push(MPMCQueue* queue) {
+
+    /* Tail needs to be loaded first, otherwise we might overestimate the amount
+     * of free space */
     unsigned int tail = atomic_load(&queue->tail.committed.atomic_value);
     unsigned int head = atomic_load(&queue->head.pending.atomic_value);
 
