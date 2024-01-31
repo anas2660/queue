@@ -71,7 +71,11 @@ typedef struct SPSCQueue {
     union QueueSingleSide head;
     union QueueSingleSide tail;
     unsigned int queue_size;    /* Should always be less than INT32_MAX */
-    atomic_uint waiters;
+    union {
+        atomic_uint waiters;
+        atomic_uint tail_waiters;
+        atomic_uint head_waiters;
+    };
 } SPSCQueue;
 
 typedef struct MPMCQueue {
@@ -82,13 +86,21 @@ typedef struct MPMCQueue {
     atomic_uint tail_waiters;
 } MPMCQueue;
 
-#define QUEUE_ATOMIC_WAIT(x, v)
-#define QUEUE_ATOMIC_WAKE(x, n)
-#define QUEUE_ATOMIC_WAKE_ONE(x)
-#define QUEUE_ATOMIC_WAKE_ALL(x)
+#define QUEUE_ATOMIC_WAIT(atomic_x, v)
+#define QUEUE_ATOMIC_WAIT_AND_READ(atomic_x, v) {QUEUE_ATOMIC_WAIT((atomix_x), (v)); (v) = atomic_load(atomic_x);}
+#define QUEUE_ATOMIC_WAKE(atomic_x, n)
+#define QUEUE_ATOMIC_WAKE_ONE(atomic_x)
+#define QUEUE_ATOMIC_WAKE_ALL(atomic_x)
 
-#define QUEUE_WAIT_FOR_TAIL(queue, committed) QUEUE_ATOMIC_WAIT(&(queue)->tail.committed.atomic_value, (v))
-#define QUEUE_WAIT_FOR_HEAD(queue, committed) QUEUE_ATOMIC_WAIT(&(queue)->head.committed.atomic_value, (v))
+#define QUEUE_WAIT_FOR_TAIL(queue, v) {                                 \
+        atomic_fetch_add(&(queue)->tail_waiters, 1);                    \
+        QUEUE_ATOMIC_WAIT_AND_READ(&(queue)->tail.committed.atomic_value, (v)); \
+        atomic_fetch_sub(&(queue)->tail_waiters, 1);}
+
+#define QUEUE_WAIT_FOR_HEAD(queue, v) {                                 \
+        atomic_fetch_add(&(queue)->head_waiters, 1);                    \
+        QUEUE_ATOMIC_WAIT_AND_READ(&(queue)->head.committed.atomic_value, (v)); \
+        atomic_fetch_sub(&(queue)->head_waiters, 1);}
 
 #define QUEUE_WAKE_TAIL_WAITER(queue) QUEUE_ATOMIC_WAKE_ONE(&queue->tail.committed.atomic_value)
 #define QUEUE_WAKE_HEAD_WAITER(queue) QUEUE_ATOMIC_WAKE_ONE(&queue->head.committed.atomic_value)
@@ -193,7 +205,6 @@ static inline int mpmc_prepare_push(MPMCQueue* queue) {
     while (1) {
         while (queue_get_free_explicit(queue, head, tail) == 0) {
             QUEUE_WAIT_FOR_TAIL(queue, tail);
-            tail = atomic_load(&queue->tail.committed.atomic_value);
             head = atomic_load(&queue->head.pending.atomic_value);
         }
 
@@ -262,9 +273,8 @@ static inline int mpmc_prepare_consume(MPMCQueue* queue) {
     unsigned int tail = atomic_load(&queue->tail.pending.atomic_value);
 
     while (1) {
-        if (queue_get_committed_explicit(head, tail) == 0) {
+        while (queue_get_committed_explicit(head, tail) == 0) {
             QUEUE_WAIT_FOR_HEAD(queue, head);
-            head = atomic_load(&queue->head.committed.atomic_value);
             tail = atomic_load(&queue->tail.pending.atomic_value);
         }
 
