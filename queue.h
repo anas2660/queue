@@ -219,6 +219,19 @@ static inline int mpmc_try_commit_push(MPMCQueue* queue, unsigned int prepared_i
     return 0;
 }
 
+static inline void mpmc_commit_push(MPMCQueue* queue, unsigned int prepared_index) {
+    unsigned int head_committed = atomic_load(&queue->head.committed.atomic_value);
+
+    /* Wait for sequential increment */
+    while (prepared_index != head_committed)
+        QUEUE_WAIT_FOR_HEAD(queue, head_committed);
+
+    head_committed = atomic_fetch_add(&queue->head.committed.atomic_value, 1);
+
+    if (queue->head_waiters || head_committed == queue->tail.pending.atomic_value)
+        QUEUE_WAKE_ALL_HEAD_WAITERS(queue);
+}
+
 
 
 /* struct _queue_header { */
