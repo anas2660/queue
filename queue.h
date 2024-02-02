@@ -125,10 +125,10 @@ typedef struct MPMCQueue {
 }
 
 
-#define QUEUE_WAKE_TAIL_WAITER(queue) QUEUE_ATOMIC_WAKE_ONE(&queue->tail.committed.atomic_value)
-#define QUEUE_WAKE_HEAD_WAITER(queue) QUEUE_ATOMIC_WAKE_ONE(&queue->head.committed.atomic_value)
-#define QUEUE_WAKE_ALL_TAIL_WAITERS(queue) QUEUE_ATOMIC_WAKE_ALL(&queue->tail.committed.atomic_value)
-#define QUEUE_WAKE_ALL_HEAD_WAITERS(queue) QUEUE_ATOMIC_WAKE_ALL(&queue->head.committed.atomic_value)
+#define QUEUE_WAKE_TAIL_WAITER(tail_committed) QUEUE_ATOMIC_WAKE_ONE(tail_committed)
+#define QUEUE_WAKE_HEAD_WAITER(head_committed) QUEUE_ATOMIC_WAKE_ONE(head_committed)
+#define QUEUE_WAKE_ALL_TAIL_WAITERS(tail_committed) QUEUE_ATOMIC_WAKE_ALL(tail_committed)
+#define QUEUE_WAKE_ALL_HEAD_WAITERS(head_committed) QUEUE_ATOMIC_WAKE_ALL(head_committed)
 
 #define uint unsigned int
 
@@ -160,7 +160,7 @@ static inline void sp_commit_push(uint prepared_index, atomic_uint* head_committ
     atomic_fetch_add(head_committed, 1);
 
     if (atomic_load(head_waiters))
-        QUEUE_WAKE_HEAD_WAITER(queue);
+        QUEUE_WAKE_HEAD_WAITER(head_committed);
 }
 
 /* --- Single consumer implementation --- */
@@ -192,7 +192,7 @@ static inline void sc_commit_consume(unsigned int prepared_index, atomic_uint* t
 
     /* As this is an SC queue any waiters would have to be the producer in this case */
     if (atomic_load(tail_waiters))
-        QUEUE_WAKE_TAIL_WAITER(queue);
+        QUEUE_WAKE_TAIL_WAITER(tail_committed);
 }
 
 /* Multi producer implementation */
@@ -246,7 +246,7 @@ static inline int mp_try_commit_push(unsigned int prepared_index, atomic_uint* h
     atomic_fetch_add(head_committed, 1);
 
     if (atomic_load(head_waiters))
-        QUEUE_WAKE_ALL_HEAD_WAITERS(queue);
+        QUEUE_WAKE_ALL_HEAD_WAITERS(head_committed);
 
     return 0;
 }
@@ -261,7 +261,7 @@ static inline void mp_commit_push(unsigned int prepared_index, atomic_uint* head
     atomic_fetch_add(head_committed, 1);
 
     if (atomic_load(head_waiters))
-        QUEUE_WAKE_ALL_HEAD_WAITERS(queue);
+        QUEUE_WAKE_ALL_HEAD_WAITERS(head_committed);
 }
 
 /* Multi consumer implementation */
@@ -319,7 +319,7 @@ static inline int mc_try_commit_consume(unsigned int prepared_index, atomic_uint
     atomic_fetch_add(tail_committed, 1);
 
     if (atomic_load(tail_waiters))
-        QUEUE_WAKE_ALL_TAIL_WAITERS(queue);
+        QUEUE_WAKE_ALL_TAIL_WAITERS(tail_committed);
 
     return 0;
 }
@@ -334,7 +334,7 @@ static inline void mc_commit_consume(unsigned int prepared_index, atomic_uint* t
     atomic_fetch_add(tail_committed, 1);
 
     if (atomic_load(tail_waiters))
-        QUEUE_WAKE_ALL_TAIL_WAITERS(queue);
+        QUEUE_WAKE_ALL_TAIL_WAITERS(tail_committed);
 }
 
 
