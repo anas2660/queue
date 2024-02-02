@@ -85,15 +85,30 @@ typedef struct MPMCQueue {
     atomic_uint tail_waiters;
 } MPMCQueue;
 
+typedef struct MPSCQueue {
+    struct QueueMultiSide head;
+    union QueueSingleSide tail;
+    unsigned int queue_size;    /* Should always be less than INT32_MAX */
+    atomic_uint head_waiters;
+    atomic_uint tail_waiters;
+} MPSCQueue;
+
+typedef struct SPMCQueue {
+    union QueueSingleSide head;
+    struct QueueMultiSide tail;
+    unsigned int queue_size;    /* Should always be less than INT32_MAX */
+    atomic_uint head_waiters;
+    atomic_uint tail_waiters;
+} SPMCQueue;
+
 #define queue_init(queue, size) { memset((queue), 0, sizeof((queue)[0])); (queue)->queue_size = size; }
 #define queue_get_used(queue) ((queue)->head.pending.atomic_value - (queue)->tail.committed.atomic_value)
-#define queue_get_free_explicit(queue_size, head_pending, tail_committed) ((int)((queue_size) - ((head_pending) - (tail_committed))))
 #define queue_get_free(queue) ((int)((queue)->queue_size - queue_get_used(queue)))
+#define queue_get_free_explicit(queue_size, head_pending, tail_committed) ((int)((queue_size) - ((head_pending) - (tail_committed))))
 #define queue_get_committed(queue) ((queue)->head.committed.atomic_value - (queue)->tail.pending.atomic_value)
 #define queue_get_committed_explicit(head_committed, tail_pending) ((head_committed) - (tail_pending))
 
 /* Implementation */
-
 
 #define QUEUE_ATOMIC_WAIT(atomic_x, v)
 #define QUEUE_ATOMIC_WAIT_AND_READ(atomic_x, v) {QUEUE_ATOMIC_WAIT((atomix_x), (v)); (v) = atomic_load(atomic_x);}
@@ -101,22 +116,11 @@ typedef struct MPMCQueue {
 #define QUEUE_ATOMIC_WAKE_ONE(atomic_x)
 #define QUEUE_ATOMIC_WAKE_ALL(atomic_x)
 
-#define QUEUE_WAIT_FOR_TAIL_OLD(queue, v) {                                \
-        atomic_fetch_add(&(queue)->tail_waiters, 1);                    \
-        QUEUE_ATOMIC_WAIT_AND_READ(&(queue)->tail.committed.atomic_value, (v)); \
-        atomic_fetch_sub(&(queue)->tail_waiters, 1);}
-
 #define QUEUE_WAIT_FOR_TAIL(tail_waiters, tail_committed, v) {  \
         atomic_fetch_add(tail_waiters, 1);                      \
         QUEUE_ATOMIC_WAIT_AND_READ(tail_committed, v);          \
         atomic_fetch_sub(tail_waiters, 1);                      \
 }
-
-#define QUEUE_WAIT_FOR_HEAD_OLD(queue, v) {                                 \
-        atomic_fetch_add(&(queue)->head_waiters, 1);                    \
-        QUEUE_ATOMIC_WAIT_AND_READ(&(queue)->head.committed.atomic_value, (v)); \
-        atomic_fetch_sub(&(queue)->head_waiters, 1);}
-
 
 #define QUEUE_WAIT_FOR_HEAD(head_waiters, head_comitted, v) {           \
         atomic_fetch_add(head_waiters, 1);                              \
@@ -187,7 +191,7 @@ static inline int sc_prepare_consume(atomic_uint* head_committed, uint tail_pend
     return tail_pending;
 }
 
-static inline void sc_commit_consume(unsigned int prepared_index, atomic_uint* tail_committed, atomic_uint* tail_waiters) {
+static inline void sc_commit_consume(uint prepared_index, atomic_uint* tail_committed, atomic_uint* tail_waiters) {
     atomic_fetch_add(tail_committed, 1);
 
     /* As this is an SC queue any waiters would have to be the producer in this case */
@@ -239,7 +243,7 @@ static inline int mp_prepare_push(uint queue_size, atomic_uint* tail_committed, 
 /* Returns 0 on success and -1 if it is too early to push. As we can only commit
  * sequentially it can be too early to push in some cases if it would be out of
  * order. */
-static inline int mp_try_commit_push(unsigned int prepared_index, atomic_uint* head_committed, atomic_uint* head_waiters) {
+static inline int mp_try_commit_push(uint prepared_index, atomic_uint* head_committed, atomic_uint* head_waiters) {
     if (prepared_index != atomic_load(head_committed))
         return -1;
 
@@ -251,7 +255,7 @@ static inline int mp_try_commit_push(unsigned int prepared_index, atomic_uint* h
     return 0;
 }
 
-static inline void mp_commit_push(unsigned int prepared_index, atomic_uint* head_committed, atomic_uint* head_waiters) {
+static inline void mp_commit_push(uint prepared_index, atomic_uint* head_committed, atomic_uint* head_waiters) {
     uint head = atomic_load(head_committed);
 
     /* Wait for sequential increment */
@@ -307,9 +311,8 @@ static inline int mc_prepare_consume(atomic_uint* head_committed, atomic_uint* t
     }
 }
 
-
 /* Returns 0 on success and -1 if it is too early to push*/
-static inline int mc_try_commit_consume(unsigned int prepared_index, atomic_uint* tail_committed, atomic_uint* tail_waiters) {
+static inline int mc_try_commit_consume(uint prepared_index, atomic_uint* tail_committed, atomic_uint* tail_waiters) {
     uint tail = atomic_load(tail_committed);
 
     /* Wait for sequential increment */
@@ -324,7 +327,7 @@ static inline int mc_try_commit_consume(unsigned int prepared_index, atomic_uint
     return 0;
 }
 
-static inline void mc_commit_consume(unsigned int prepared_index, atomic_uint* tail_committed, atomic_uint* tail_waiters) {
+static inline void mc_commit_consume(uint prepared_index, atomic_uint* tail_committed, atomic_uint* tail_waiters) {
     uint tail = atomic_load(tail_committed);
 
     /* Wait for sequential increment */
@@ -372,11 +375,7 @@ static inline void spsc_commit_consume(unsigned int prepared_index, SPSCQueue* q
 }
 
 
-
-
-
-
-
+/* MPMC implementation */
 
 /* Returns an index to push or -1 on failure (Queue is full) */
 static inline int mpmc_try_prepare_push(MPMCQueue* queue) {
@@ -429,7 +428,97 @@ static inline void mpmc_commit_consume(unsigned int prepared_index, MPMCQueue* q
     mc_commit_consume(prepared_index, &queue->tail.committed.atomic_value, &queue->tail_waiters);
 }
 
+
+
+/* MPSC implementation */
+
+
+/* Returns an index to push or -1 on failure (Queue is full) */
+static inline int mpsc_try_prepare_push(MPSCQueue* queue) {
+    return mp_try_prepare_push(queue->queue_size,
+                               &queue->tail.committed.atomic_value,
+                               &queue->head.pending.atomic_value);
+}
+
+/* Returns an index to push */
+static inline int mpsc_prepare_push(MPSCQueue* queue) {
+    return mp_prepare_push(queue->queue_size,
+                           &queue->tail.committed.atomic_value,
+                           &queue->head.pending.atomic_value,
+                           &queue->tail_waiters);
+}
+
+/* Returns 0 on success and -1 if it is too early to push. As we can only commit
+ * sequentially it can be too early to push in some cases if it would be out of
+ * order. */
+static inline int mpsc_try_commit_push(unsigned int prepared_index, MPSCQueue* queue) {
+    return mp_try_commit_push(prepared_index, &queue->head.committed.atomic_value, &queue->head_waiters);
+}
+
+static inline void mpsc_commit_push(unsigned int prepared_index, MPSCQueue* queue) {
+    mp_commit_push(prepared_index, &queue->head.committed.atomic_value, &queue->head_waiters);
+}
+
+/* Returns an index to consume or -1 on failure (Queue is empty) */
+static inline int mpsc_try_prepare_consume(MPSCQueue* queue) {
+    return sc_try_prepare_consume(&queue->head.committed.atomic_value, queue->tail.pending.value);
+}
+
+/* Returns an index to consume */
+static inline int mpsc_prepare_consume(MPSCQueue* queue) {
+    return sc_prepare_consume(&queue->head.committed.atomic_value, queue->tail.pending.value, &queue->head_waiters);
+}
+
+static inline void mpsc_commit_consume(unsigned int prepared_index, MPSCQueue* queue) {
+    sc_commit_consume(prepared_index, &queue->tail.committed.atomic_value, &queue->tail_waiters);
+}
+
+
+/* SPMC implementation */
+
+
+/* Returns an index to push or -1 on failure (Queue is full) */
+static inline int spmc_try_prepare_push(SPMCQueue* queue) {
+    return sp_try_prepare_push(queue->queue_size, queue->head.pending.value, &queue->tail.committed.atomic_value);
+}
+
+/* Returns an index to push or -1 on failure (Queue is full) */
+static inline int spmc_prepare_push(SPMCQueue* queue) {
+    return sp_prepare_push(queue->queue_size, queue->head.pending.value,
+                           &queue->tail.committed.atomic_value, &queue->tail_waiters);
+}
+
+static inline void spmc_commit_push(unsigned int prepared_index, SPMCQueue* queue) {
+    sp_commit_push(prepared_index, &queue->head.committed.atomic_value, &queue->head_waiters);
+}
+
+/* Returns an index to consume or -1 on failure (Queue is empty) */
+static inline int spmc_try_prepare_consume(SPMCQueue* queue) {
+    return mc_try_prepare_consume(&queue->head.committed.atomic_value, &queue->tail.pending.atomic_value);
+}
+
+
+/* Returns an index to consume */
+static inline int spmc_prepare_consume(SPMCQueue* queue) {
+    return mc_prepare_consume(&queue->head.committed.atomic_value,
+                       &queue->tail.pending.atomic_value,
+                       &queue->head_waiters);
+}
+
+
+/* Returns 0 on success and -1 if it is too early to push*/
+static inline int spmc_try_commit_consume(unsigned int prepared_index, SPMCQueue* queue) {
+    return mc_try_commit_consume(prepared_index, &queue->tail.committed.atomic_value, &queue->tail_waiters);
+}
+
+
+static inline void spmc_commit_consume(unsigned int prepared_index, SPMCQueue* queue) {
+    mc_commit_consume(prepared_index, &queue->tail.committed.atomic_value, &queue->tail_waiters);
+}
+
+
 #undef uint
+
 /* struct _queue_header { */
 /*     atomic_uint position;  // Index of next task to be run. */
 /*     atomic_uint committed; // Index of last task added to the queue. */
