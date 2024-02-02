@@ -109,14 +109,14 @@ typedef struct MPMCQueue {
 
 #define queue_init(queue, size) { memset((queue), 0, sizeof((queue)[0])); (queue)->queue_size = size; }
 #define queue_get_used(queue) ((queue)->head.pending.atomic_value - (queue)->tail.committed.atomic_value)
-#define queue_get_free_explicit(queue, head_pending, tail_committed) ((queue)->queue_size - ((head_pending) - (tail_committed)))
-#define queue_get_free(queue) ((queue)->queue_size - queue_get_used(queue))
+#define queue_get_free_explicit(queue, head_pending, tail_committed) ((int)((queue)->queue_size - ((head_pending) - (tail_committed))))
+#define queue_get_free(queue) ((int)((queue)->queue_size - queue_get_used(queue)))
 #define queue_get_committed(queue) ((queue)->head.committed.atomic_value - (queue)->tail.pending.atomic_value)
 #define queue_get_committed_explicit(head_committed, tail_pending) ((head_committed) - (tail_pending))
 
 /* Returns an index to push or -1 on failure (Queue is full) */
 static inline int spsc_try_prepare_push(SPSCQueue* queue) {
-    if (queue_get_free(queue) == 0)
+    if (queue_get_free(queue) <= 0)
         return -1;
 
     /* As this is an SP queue the usage cannot increase from this point
@@ -129,7 +129,7 @@ static inline int spsc_prepare_push(SPSCQueue* queue) {
     unsigned int head_pending   = queue->head.pending.value;
     unsigned int tail_committed = queue->tail.committed.atomic_value;
 
-    while (queue_get_free_explicit(queue, head_pending, tail_committed) == 0)
+    while (queue_get_free_explicit(queue, head_pending, tail_committed) <= 0)
         QUEUE_WAIT_FOR_TAIL(queue, tail_committed);
 
     /* As this is an SP queue the usage cannot increase from this point
@@ -156,7 +156,7 @@ static inline int spsc_try_prepare_consume(SPSCQueue* queue) {
 }
 
 static inline int spsc_prepare_consume(SPSCQueue* queue) {
-    unsigned int head_committed = queue->head.committed.atomic_value;
+    unsigned int head_committed = atomic_load(&queue->head.committed.atomic_value);
     unsigned int tail_pending = queue->tail.pending.value;
 
     while (queue_get_committed_explicit(head_committed, tail_pending) == 0)
@@ -184,7 +184,7 @@ static inline int mpmc_try_prepare_push(MPMCQueue* queue) {
     unsigned int head = atomic_load(&queue->head.pending.atomic_value);
 
     while (1) {
-        if (queue_get_free_explicit(queue, head, tail) == 0)
+        if (queue_get_free_explicit(queue, head, tail) <= 0)
             return -1;
 
         /* As this is an MP queue another thread might have taken our index. */
@@ -203,7 +203,7 @@ static inline int mpmc_prepare_push(MPMCQueue* queue) {
     unsigned int head = atomic_load(&queue->head.pending.atomic_value);
 
     while (1) {
-        while (queue_get_free_explicit(queue, head, tail) == 0) {
+        while (queue_get_free_explicit(queue, head, tail) <= 0) {
             QUEUE_WAIT_FOR_TAIL(queue, tail);
             head = atomic_load(&queue->head.pending.atomic_value);
         }
