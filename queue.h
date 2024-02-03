@@ -205,8 +205,8 @@ static inline void sc_commit_consume(uint prepared_index, atomic_uint* tail_comm
 static inline int mp_try_prepare_push(uint queue_size, atomic_uint* tail_committed, atomic_uint* head_pending) {
 
     /* Tail needs to be loaded first, otherwise we might overestimate the amount of free space */
-    unsigned int tail = atomic_load(tail_committed);
-    unsigned int head = atomic_load(head_pending);
+    uint tail = atomic_load(tail_committed);
+    uint head = atomic_load(head_pending);
 
     while (1) {
         if (queue_get_free_explicit(queue_size, head, tail) <= 0)
@@ -224,8 +224,8 @@ static inline int mp_prepare_push(uint queue_size, atomic_uint* tail_committed, 
 
     /* Tail needs to be loaded first, otherwise we might overestimate the amount
      * of free space */
-    unsigned int tail = atomic_load(tail_committed);
-    unsigned int head = atomic_load(head_pending);
+    uint tail = atomic_load(tail_committed);
+    uint head = atomic_load(head_pending);
 
     while (1) {
         while (queue_get_free_explicit(queue_size, head, tail) <= 0) {
@@ -295,8 +295,8 @@ static inline int mc_prepare_consume(atomic_uint* head_committed, atomic_uint* t
 
     /* Head needs to be loaded first, otherwise we might overestimate the amount
      * of committed space */
-    unsigned int head = atomic_load(head_committed);
-    unsigned int tail = atomic_load(tail_pending);
+    uint head = atomic_load(head_committed);
+    uint tail = atomic_load(tail_pending);
 
     while (1) {
         while (queue_get_committed_explicit(head, tail) == 0) {
