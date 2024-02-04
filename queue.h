@@ -1,11 +1,7 @@
 #ifndef QUEUE_H
 #define QUEUE_H
 
-#include <stdint.h>
-#include <stdlib.h>
-
 #include <stdatomic.h>
-#include <string.h>
 
 /*
 
@@ -101,7 +97,8 @@ typedef struct SPMCQueue {
     atomic_uint tail_waiters;
 } SPMCQueue;
 
-#define queue_init(queue, size) { memset((queue), 0, sizeof((queue)[0])); (queue)->queue_size = size; }
+// memset((queue), 0, sizeof((queue)[0]));
+#define queue_init(queue, size) { *(queue) = (typeof(*queue)){.queue_size = size}; }
 #define queue_get_used(queue) ((queue)->head.pending.atomic_value - (queue)->tail.committed.atomic_value)
 #define queue_get_free(queue) ((int)((queue)->queue_size - queue_get_used(queue)))
 #define queue_get_free_explicit(queue_size, head_pending, tail_committed) ((int)((queue_size) - ((head_pending) - (tail_committed))))
@@ -110,11 +107,21 @@ typedef struct SPMCQueue {
 
 /* Implementation */
 
-#define QUEUE_ATOMIC_WAIT(atomic_x, v)
-#define QUEUE_ATOMIC_WAIT_AND_READ(atomic_x, v) {QUEUE_ATOMIC_WAIT((atomix_x), (v)); (v) = atomic_load(atomic_x);}
-#define QUEUE_ATOMIC_WAKE(atomic_x, n)
-#define QUEUE_ATOMIC_WAKE_ONE(atomic_x)
-#define QUEUE_ATOMIC_WAKE_ALL(atomic_x)
+#define uint unsigned int
+
+void atomic_wake_one(atomic_uint*);
+void atomic_wake_all(atomic_uint*);
+void atomic_wait(atomic_uint* futex, uint expected_value);
+
+// #define QUEUE_ATOMIC_WAKE(atomic_x, n)
+#define QUEUE_ATOMIC_WAIT(atomic_x, v) atomic_wait(atomic_x, v)
+#define QUEUE_ATOMIC_WAKE_ONE(atomic_x) atomic_wake_one(atomic_x)
+#define QUEUE_ATOMIC_WAKE_ALL(atomic_x) atomic_wake_all(atomic_x)
+#define QUEUE_ATOMIC_WAIT_AND_READ(atomic_x, v) {QUEUE_ATOMIC_WAIT((atomic_x), (v)); (v) = atomic_load(atomic_x);}
+#define QUEUE_WAKE_TAIL_WAITER(tail_committed) QUEUE_ATOMIC_WAKE_ONE(tail_committed)
+#define QUEUE_WAKE_HEAD_WAITER(head_committed) QUEUE_ATOMIC_WAKE_ONE(head_committed)
+#define QUEUE_WAKE_ALL_TAIL_WAITERS(tail_committed) QUEUE_ATOMIC_WAKE_ALL(tail_committed)
+#define QUEUE_WAKE_ALL_HEAD_WAITERS(head_committed) QUEUE_ATOMIC_WAKE_ALL(head_committed)
 
 #define QUEUE_WAIT_FOR_TAIL(tail_waiters, tail_committed, v) {  \
         atomic_fetch_add(tail_waiters, 1);                      \
@@ -122,19 +129,12 @@ typedef struct SPMCQueue {
         atomic_fetch_sub(tail_waiters, 1);                      \
 }
 
-#define QUEUE_WAIT_FOR_HEAD(head_waiters, head_comitted, v) {           \
-        atomic_fetch_add(head_waiters, 1);                              \
-        QUEUE_ATOMIC_WAIT_AND_READ(head_committed, v);                  \
-        atomic_fetch_sub(head_waiters, 1);                              \
+#define QUEUE_WAIT_FOR_HEAD(head_waiters, head_comitted, v) {   \
+        atomic_fetch_add(head_waiters, 1);                      \
+        QUEUE_ATOMIC_WAIT_AND_READ(head_committed, v);          \
+        atomic_fetch_sub(head_waiters, 1);                      \
 }
 
-
-#define QUEUE_WAKE_TAIL_WAITER(tail_committed) QUEUE_ATOMIC_WAKE_ONE(tail_committed)
-#define QUEUE_WAKE_HEAD_WAITER(head_committed) QUEUE_ATOMIC_WAKE_ONE(head_committed)
-#define QUEUE_WAKE_ALL_TAIL_WAITERS(tail_committed) QUEUE_ATOMIC_WAKE_ALL(tail_committed)
-#define QUEUE_WAKE_ALL_HEAD_WAITERS(head_committed) QUEUE_ATOMIC_WAKE_ALL(head_committed)
-
-#define uint unsigned int
 
 /* --- Single producer implementation --- */
 
@@ -518,42 +518,5 @@ static inline void spmc_commit_consume(unsigned int prepared_index, SPMCQueue* q
 
 
 #undef uint
-
-/* struct _queue_header { */
-/*     atomic_uint position;  // Index of next task to be run. */
-/*     atomic_uint committed; // Index of last task added to the queue. */
-/*     atomic_uint pending;   // Index of last task currently being added. */
-/*     atomic_uint queuers;   // Number of queuers waiting because of full queue. */
-
-/*     uint32_t queue_size; */
-/* }; */
-
-
-/* #define Queue(T) T* */
-
-/* static inline void* allocate_queue_with_size(int type_size, uint32_t size) { */
-/*     void* q = malloc(type_size*size + sizeof(struct _queue_header)); */
-/*     memset(q, 0, type_size*size + sizeof(struct _queue_header)); */
-/*     ((struct _queue_header*)q)[-1].queue_size = size; */
-/*     q = &(((struct _queue_header*)q)[1]); */
-/*     return q; */
-/* } */
-
-/* /\* Returns a Queue(T) *\/ */
-/* #define make_queue(T, size) allocate_queue_with_size(sizeof(T), size) */
-/* #define free_queue(queue) free(&((struct _queue_header*)queue)[-1]) */
-
-/* #define get_queue_header(queue) (&((struct _queue_header*)queue)[-1]) */
-
-
-/* static inline int queue_free(void* queue) { */
-/*     struct _queue_header* h = get_queue_header(queue); */
-
-/*     //u32 committed, u32 position, u32 queue_size */
-/*     return h->queue_size - (h->committed - position); */
-/* } */
-
-
-
 
 #endif /* QUEUE_H */
