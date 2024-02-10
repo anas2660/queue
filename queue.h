@@ -209,11 +209,33 @@ static inline int sc_try_prepare_consume(atomic_uint* head_committed, uint tail_
     return tail_pending;
 }
 
+/* Returns an index to consume or -1 on failure (Queue is empty) */
+static inline int sc_try_prepare_consume_many(atomic_uint* head_committed, uint tail_pending, int count) {
+    if (queue_get_committed_explicit(atomic_load(head_committed), tail_pending) < count)
+        return -1;
+
+    /* As this is an SC queue the committed cannot decrease from this point
+     * onwards, so we can safely return the current working index. */
+    return tail_pending;
+}
+
 /* Returns an index to consume */
 static inline int sc_prepare_consume(atomic_uint* head_committed, uint tail_pending, atomic_uint* head_waiters) {
     uint head = atomic_load(head_committed);
 
     while (queue_get_committed_explicit(head, tail_pending) == 0)
+        QUEUE_WAIT_FOR_HEAD(head_waiters, head_committed, head);
+
+    /* As this is an SC queue the committed cannot decrease from this point
+     * onwards, so we can consume safely. */
+    return tail_pending;
+}
+
+/* Returns an index to consume */
+static inline int sc_prepare_consume_many(atomic_uint* head_committed, uint tail_pending, atomic_uint* head_waiters, int count) {
+    uint head = atomic_load(head_committed);
+
+    while (queue_get_committed_explicit(head, tail_pending) < count)
         QUEUE_WAIT_FOR_HEAD(head_waiters, head_committed, head);
 
     /* As this is an SC queue the committed cannot decrease from this point
@@ -228,6 +250,15 @@ static inline void sc_commit_consume(uint prepared_index, atomic_uint* tail_comm
     if (atomic_load(tail_waiters))
         QUEUE_WAKE_TAIL_WAITER(tail_committed);
 }
+
+static inline void sc_commit_consume_many(uint prepared_index, atomic_uint* tail_committed, atomic_uint* tail_waiters, int count) {
+    atomic_fetch_add(tail_committed, count);
+
+    /* As this is an SC queue any waiters would have to be the producer in this case */
+    if (atomic_load(tail_waiters))
+        QUEUE_WAKE_TAIL_WAITER(tail_committed);
+}
+
 
 /* Multi producer implementation */
 
