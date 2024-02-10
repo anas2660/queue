@@ -149,10 +149,32 @@ static inline int sp_try_prepare_push(uint queue_size, uint head_pending, atomic
 }
 
 /* Returns an index to push or -1 on failure (Queue is full) */
+static inline int sp_try_prepare_push_many(uint queue_size, uint head_pending, atomic_uint* tail_committed, int count) {
+    if (queue_get_free_explicit(queue_size, head_pending, atomic_load(tail_committed)) < count)
+        return -1;
+
+    /* As this is an SP queue the usage cannot increase from this point
+     * onwards, so we can safely return the current working index. */
+    return head_pending;
+}
+
+/* Returns an index to push or -1 on failure (Queue is full) */
 static inline int sp_prepare_push(uint queue_size, uint head_pending, atomic_uint* tail_committed, atomic_uint* tail_waiters) {
     uint tail = atomic_load(tail_committed);
 
     while (queue_get_free_explicit(queue_size, head_pending, tail) <= 0)
+        QUEUE_WAIT_FOR_TAIL(tail_waiters, tail_committed, tail);
+
+    /* As this is an SP queue the usage cannot increase from this point
+     * onwards, so we can safely return the current working index. */
+    return head_pending;
+}
+
+/* Returns an index to push or -1 on failure (Queue is full) */
+static inline int sp_prepare_push_many(uint queue_size, uint head_pending, atomic_uint* tail_committed, atomic_uint* tail_waiters, int count) {
+    uint tail = atomic_load(tail_committed);
+
+    while (queue_get_free_explicit(queue_size, head_pending, tail) < count)
         QUEUE_WAIT_FOR_TAIL(tail_waiters, tail_committed, tail);
 
     /* As this is an SP queue the usage cannot increase from this point
@@ -166,6 +188,14 @@ static inline void sp_commit_push(uint prepared_index, atomic_uint* head_committ
     if (atomic_load(head_waiters))
         QUEUE_WAKE_HEAD_WAITER(head_committed);
 }
+
+static inline void sp_commit_push_many(uint prepared_index, atomic_uint* head_committed, atomic_uint* head_waiters, int count) {
+    atomic_fetch_add(head_committed, count);
+
+    if (atomic_load(head_waiters))
+        QUEUE_WAKE_HEAD_WAITER(head_committed);
+}
+
 
 /* --- Single consumer implementation --- */
 
