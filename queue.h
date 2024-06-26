@@ -129,7 +129,7 @@ void atomic_wait(atomic_uint* futex, uint expected_value);
         atomic_fetch_sub(tail_waiters, 1);                      \
 }
 
-#define QUEUE_WAIT_FOR_HEAD(head_waiters, head_comitted, v) {   \
+#define QUEUE_WAIT_FOR_HEAD(head_waiters, head_committed, v) {  \
         atomic_fetch_add(head_waiters, 1);                      \
         QUEUE_ATOMIC_WAIT_AND_READ(head_committed, v);          \
         atomic_fetch_sub(head_waiters, 1);                      \
@@ -361,7 +361,7 @@ static inline int mc_prepare_consume(atomic_uint* head_committed, atomic_uint* t
 
     while (1) {
         while (queue_get_committed_explicit(head, tail) == 0) {
-            QUEUE_WAIT_FOR_HEAD(head_waiters, head_comitted, head);
+            QUEUE_WAIT_FOR_HEAD(head_waiters, head_committed, head);
             tail = atomic_load(tail_pending);
         }
 
