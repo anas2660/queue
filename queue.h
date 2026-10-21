@@ -103,7 +103,7 @@ typedef struct SPMCQueue {
 #define queue_get_free(queue) ((int)((queue)->queue_size - queue_get_used(queue)))
 #define queue_get_free_explicit(queue_size, head_pending, tail_committed) ((int)((queue_size) - ((head_pending) - (tail_committed))))
 #define queue_get_committed(queue) ((queue)->head.committed.atomic_value - (queue)->tail.pending.atomic_value)
-#define queue_get_committed_explicit(head_committed, tail_pending) ((head_committed) - (tail_pending))
+#define queue_get_committed_explicit(head_committed, tail_pending) ((int)((head_committed) - (tail_pending)))
 
 /* Implementation */
 
